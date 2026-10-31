@@ -1,0 +1,2 @@
+-r plugins.v2/thundersubtitles/requirements.txt
+APScheduler>=3.10,<4
