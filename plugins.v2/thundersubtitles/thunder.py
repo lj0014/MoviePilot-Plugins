@@ -134,6 +134,73 @@ def compatible(name, video):
     return True
 
 
+def release_features(name):
+    """Use release labels as hints, never as proof of synchronization."""
+    text = clean_name(str(name)).lower()
+    source = set()
+    for label, pattern in (
+        ('bluray', r'blu[ ._-]?ray|b[dr][ ._-]?rip|bdremux|蓝光|藍光'),
+        ('web', r'web[ ._-]?(?:dl|rip)|\bwebrip\b'),
+        ('dvd', r'dvd[ ._-]?(?:rip|scr)?|dvd9|dvd5'),
+        ('hdtv', r'hdtv|pdtv'),
+    ):
+        if re.search(pattern, text):
+            source.add(label)
+    cuts = set()
+    for label, pattern in (
+        ('extended', r'\bextended\b|加长|加長'),
+        ('director', r"director[ ._'’-]*s?[ ._-]*cut|导演剪辑|導演剪輯"),
+        ('theatrical', r'\btheatrical\b|院线版|院線版|公映版'),
+        ('unrated', r'\bunrated\b|未分级|未分級'),
+    ):
+        if re.search(pattern, text):
+            cuts.add(label)
+    # A group is useful only when explicitly present at the end of a release
+    # name, e.g. x265-EDGE2020. Do not infer it from the movie's title.
+    stem = re.sub(r'\.(?:mkv|mp4|avi|srt|ass|ssa|zip|vtt)$', '', text)
+    stem = re.sub(r'(?:[ ._-](?:chs|cht|eng|zh|en|中英|双语|简体|繁体))+$', '', stem)
+    group = re.search(r'-([a-z][a-z0-9]{1,24})$', stem)
+    group = group.group(1) if group and re.search(r'\b(?:19|20)\d{2}\b', text) else ''
+    if group in {'dl', 'rip', 'ray', 'cn', 'tw', 'chs', 'cht', 'eng'}:
+        group = ''
+    return {'source': source, 'cuts': cuts, 'group': group,
+            'remaster': bool(re.search(r'\bremaster(?:ed)?\b|重制|重製|修复|修復', text))}
+
+
+def release_match(name, video_name):
+    sub, video = release_features(name), release_features(video_name)
+    score, reasons = 0, []
+    if sub['cuts'] and video['cuts']:
+        if sub['cuts'] != video['cuts']:
+            return None, ['剪辑版本不同']
+        score += 60
+        reasons.append('剪辑版一致')
+    elif sub['cuts']:
+        # An unlabeled movie may be theatrical or extended; do not assume
+        # either. Prefer an ordinary candidate over a specially labeled cut.
+        score -= 15
+        reasons.append('字幕含特殊剪辑标记，视频未标明')
+    if sub['source'] and video['source']:
+        if sub['source'] & video['source']:
+            score += 40
+            reasons.append('片源类型一致')
+        else:
+            score -= 40
+            reasons.append('片源类型不同')
+    if sub['group'] and sub['group'] == video['group']:
+        score += 25
+        reasons.append('发布组一致')
+    if sub['remaster'] and video['remaster']:
+        score += 10
+        reasons.append('均标记重制版')
+    return score, reasons
+
+
+def selection_rank(candidate, preference, video_name):
+    score, _ = release_match(candidate.get('name', ''), video_name)
+    return (score if score is not None else -1000,) + rank(candidate, preference)
+
+
 def decode_text(data):
     if not data:
         raise SubtitleError('字幕为空')
@@ -237,26 +304,34 @@ class ThunderClient:
                 extension = '.srt'
             yield data, extension, candidate['name']
 
-    def find(self, video, preference='simplified', utf8=True, stop=None):
-        candidates = self.search(cid_hash(video, stop), preference, stop)
+    def find(self, video, preference='simplified', utf8=True, stop=None, source_name=''):
+        reference = source_name or str(video)
+        identity = str(video) + ' ' + reference
+        candidates = [item for item in self.search(cid_hash(video, stop), preference, stop)
+                      if compatible(item['name'], identity) and release_match(item['name'], reference)[0] is not None
+                      and not re.fullmatch(r'(英语|英語|english|eng|en|日语|日語|jpn|ja)', item['language'].lower())]
+        candidates.sort(key=lambda item: selection_rank(item, preference, reference), reverse=True)
         for candidate in candidates[:10]:
             check_stop(stop)
-            if not compatible(candidate['name'], video):
-                continue
-            language = candidate['language'].lower()
-            if re.fullmatch(r'(英语|英語|english|eng|en|日语|日語|jpn|ja)', language):
-                continue
             try:
                 data = self.fetch(candidate['url'], stop)
-                choices = list(self.choices(data, candidate, video, stop))
-                choices.sort(key=lambda item: rank({'name': item[2]}, preference), reverse=True)
+                choices = list(self.choices(data, candidate, identity, stop))
+                choices.sort(key=lambda item: selection_rank({'name': item[2]}, preference, reference), reverse=True)
                 for content, extension, name in choices:
+                    if not compatible(name, identity):
+                        continue
+                    score, reasons = release_match(name, reference)
+                    if score is None:
+                        continue
                     try:
                         text = validate_subtitle(content, extension)
                     except SubtitleError:
                         continue
                     return {'data': text.encode('utf-8') if utf8 else content,
-                            'extension': extension, 'name': name}
+                            'extension': extension, 'name': name,
+                            'source_name': clean_name(reference),
+                            'match': '；'.join(reasons) if reasons else '无版本匹配线索',
+                            'match_score': score}
             except Cancelled:
                 raise
             except (requests.RequestException, SubtitleError, zipfile.BadZipFile, RuntimeError, NotImplementedError, UnicodeError):

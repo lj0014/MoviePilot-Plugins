@@ -160,4 +160,72 @@ class DownloadTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b'first')
 
 
+class ReleaseSelectionTests(unittest.TestCase):
+    def candidates(self, names):
+        return [{'name': name, 'language': '中文', 'rate': 5, 'votes': 100,
+                 'url': 'https://subtitle.v.geilijiasu.com/%s.srt' % i}
+                for i, name in enumerate(names)]
+
+    def find(self, names, source='', video_name='电影 (1994) - 1080p.mkv', contents=None):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / video_name
+            video.write_bytes(b'video')
+            client = t.ThunderClient()
+            with patch.object(client, 'search', return_value=self.candidates(names)), patch.object(
+                    client, 'fetch', side_effect=contents or (lambda url, stop: CHINESE.encode())):
+                return client.find(video, 'bilingual', source_name=source)
+
+    def test_original_bluray_source_beats_web_bilingual(self):
+        names = ['Movie.1994.WEB-DL.中英.srt', 'Movie.1994.BluRay.简体.srt']
+        result = self.find(names, 'Movie.1994.1080p.BluRay.x265-EDGE2020.mkv')
+        self.assertEqual(result['name'], names[1])
+        self.assertIn('片源类型一致', result['match'])
+
+    def test_bilingual_remains_preferred_with_same_release_evidence(self):
+        names = ['Movie.1994.BluRay.简体.srt', 'Movie.1994.BluRay.中英.srt']
+        self.assertEqual(self.find(names, 'Movie.1994.BluRay.mkv')['name'], names[1])
+
+    def test_matching_group_beats_generic_bluray(self):
+        names = ['Movie.1994.BluRay.中英.srt', 'Movie.1994.BluRay.x265-EDGE2020.srt']
+        result = self.find(names, 'Movie.1994.BluRay.x265-EDGE2020.mkv')
+        self.assertEqual(result['name'], names[1])
+        self.assertIn('发布组一致', result['match'])
+
+    def test_explicit_cut_conflict_is_not_downloaded(self):
+        names = ['Movie.1994.Extended.BluRay.中英.srt', 'Movie.1994.Theatrical.BluRay.srt']
+        self.assertEqual(self.find(names, 'Movie.1994.Theatrical.BluRay.mkv')['name'], names[1])
+        self.assertIsNone(self.find(names[:1], 'Movie.1994.Theatrical.BluRay.mkv'))
+
+    def test_unknown_filename_does_not_claim_timeline_match(self):
+        result = self.find(['中文字幕.srt'])
+        self.assertEqual(result['match'], '无版本匹配线索')
+        self.assertEqual(result['match_score'], 0)
+
+    def test_release_match_is_ranked_before_download_limit(self):
+        names = ['Movie.1994.WEB-DL.中英.%s.srt' % i for i in range(12)] + ['Movie.1994.BluRay.srt']
+        self.assertEqual(self.find(names, 'Movie.1994.BluRay.mkv')['name'], names[-1])
+
+    def test_zip_member_selection_uses_release_and_rejects_wrong_cut(self):
+        archive = io.BytesIO()
+        names = ['Movie.1994.Extended.BluRay.中英.srt', 'Movie.1994.Theatrical.WEB-DL.中英.srt',
+                 'Movie.1994.Theatrical.BluRay.srt']
+        with zipfile.ZipFile(archive, 'w') as z:
+            for name in names: z.writestr(name, CHINESE)
+        result = self.find(['字幕包.zip'], 'Movie.1994.Theatrical.BluRay.mkv', contents=[archive.getvalue()])
+        self.assertEqual(result['name'], names[-1])
+
+    def test_release_hint_without_episode_does_not_hide_target_episode(self):
+        result = self.find(['Show.S01E01.BluRay.srt'], 'Show.BluRay.mkv', video_name='Show.S01E01.mkv')
+        self.assertIsNotNone(result)
+
+    def test_english_only_matches_do_not_exhaust_candidate_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / 'Movie.1994.BluRay.mkv'; video.write_bytes(b'video')
+            records = self.candidates(['Movie.1994.BluRay.%s.srt' % i for i in range(12)] + ['中文.srt'])
+            for item in records[:-1]: item['language'] = '英语'
+            client = t.ThunderClient()
+            with patch.object(client, 'search', return_value=records), patch.object(client, 'fetch', return_value=CHINESE.encode()):
+                self.assertEqual(client.find(video)['name'], '中文.srt')
+
+
 if __name__ == '__main__': unittest.main()

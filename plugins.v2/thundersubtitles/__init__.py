@@ -39,7 +39,7 @@ class ThunderSubtitles(_PluginBase):
     plugin_name = '迅雷字幕'
     plugin_desc = '整理入库后按视频 CID 下载迅雷中文字幕。'
     plugin_icon = 'https://raw.githubusercontent.com/lj0014/MoviePilot-Plugins/main/icons/thundersubtitles.svg'
-    plugin_version = '1.0.1'
+    plugin_version = '1.1.0'
     plugin_author = 'lijin'
     author_url = 'https://github.com/lj0014'
     plugin_config_prefix = 'thundersubtitles_'
@@ -133,15 +133,24 @@ class ThunderSubtitles(_PluginBase):
             item = field(transfer, 'target_item')
             if item and field(item, 'type', 'file') == 'file':
                 files = [field(item, 'path')]
+        # TransferComplete includes the original file and its individual target.
+        # Bind the hint to that target; never apply a movie/episode's filename
+        # indiscriminately to a batch of other destination files.
+        original = field(event.event_data, 'fileitem') or field(transfer, 'fileitem')
+        original_path = field(original, 'path') or field(original, 'name') or ''
+        source_name = str(original_path).replace('\\', '/').rsplit('/', 1)[-1]
+        target_path = field(field(transfer, 'target_item'), 'path')
+        video_files = [v for v in files if Path(str(v if isinstance(v, (str, Path)) else field(v, 'path', ''))).suffix.lower() in VIDEO_EXTENSIONS]
         for value in files:
             value = value if isinstance(value, (str, Path)) else field(value, 'path')
             if not value:
                 continue
             path = mapped_path(value, self._config.get('source_prefix') or '', self._config.get('local_prefix') or '')
             if path.suffix.lower() in VIDEO_EXTENSIONS:
-                self._enqueue('file', str(path))
+                hint = source_name if (str(value) == str(target_path) or (not target_path and len(video_files) == 1)) else ''
+                self._enqueue('file', str(path), hint)
 
-    def _enqueue(self, kind, value):
+    def _enqueue(self, kind, value, source_name=''):
         with self._lifecycle_lock:
             if not self._worker or not self._worker.is_alive() or self._stop.is_set():
                 return False
@@ -151,7 +160,7 @@ class ThunderSubtitles(_PluginBase):
                     return False
                 self._pending.add(key)
             try:
-                self._jobs.put_nowait((kind, value, key))
+                self._jobs.put_nowait((kind, value, key, source_name))
                 return True
             except Full:
                 with self._pending_lock:
@@ -166,14 +175,14 @@ class ThunderSubtitles(_PluginBase):
     def _run(self, jobs, pending, stop, config):
         while not stop.is_set():
             try:
-                kind, value, key = jobs.get(timeout=0.25)
+                kind, value, key, source_name = jobs.get(timeout=0.25)
             except Empty:
                 continue
             try:
                 if kind == 'scan':
                     self._scan(config, stop)
                 else:
-                    self._process(Path(value), config, stop)
+                    self._process(Path(value), config, stop, source_name)
             except Cancelled:
                 pass
             except Exception as exc:
@@ -202,7 +211,7 @@ class ThunderSubtitles(_PluginBase):
                     if Path(name).suffix.lower() in VIDEO_EXTENSIONS:
                         self._process(Path(folder) / name, config, stop)
 
-    def _process(self, video, config, stop):
+    def _process(self, video, config, stop, source_name=''):
         if stop.is_set():
             raise Cancelled('任务已停止')
         if not video.is_absolute() or not video.is_file():
@@ -212,7 +221,8 @@ class ThunderSubtitles(_PluginBase):
             if config.get('skip_existing') and has_subtitle(video):
                 self._record(str(video), '跳过', '已有外置中文字幕', stop)
                 return
-            subtitle = ThunderClient().find(video, config.get('preference', 'simplified'), bool(config.get('utf8')), stop)
+            subtitle = ThunderClient().find(video, config.get('preference', 'simplified'), bool(config.get('utf8')), stop,
+                                            source_name=source_name)
             if subtitle is None:
                 self._record(str(video), '未匹配', '未找到可用的中文字幕', stop)
                 return
@@ -223,8 +233,12 @@ class ThunderSubtitles(_PluginBase):
                     self._record(str(video), '跳过', '已有外置中文字幕', stop)
                     return
                 target = save_subtitle(video, subtitle, stop)
-            self._record(str(video), '成功', target.name, stop)
-            logger.info('迅雷字幕：已保存 %s' % target.name)
+            detail = '%s；来源：%s；版本线索：%s（未校验时间轴）' % (
+                target.name, subtitle.get('name', '未知'), subtitle.get('match', '无版本匹配线索'))
+            if source_name:
+                detail += '；原视频：' + source_name
+            self._record(str(video), '成功', detail, stop)
+            logger.info('迅雷字幕：%s' % detail)
         except Cancelled:
             raise
         except FileExistsError:

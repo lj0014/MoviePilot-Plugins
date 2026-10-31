@@ -136,7 +136,7 @@ class PluginTests(unittest.TestCase):
     def test_duplicate_events_are_coalesced_while_running(self):
         started, release = threading.Event(), threading.Event()
         self.addCleanup(release.set)
-        def find(*args):
+        def find(*args, **kwargs):
             started.set(); release.wait(3); return DATA
         with patch.object(self.module, 'ThunderClient') as client:
             client.return_value.find.side_effect = find
@@ -150,7 +150,7 @@ class PluginTests(unittest.TestCase):
     def test_disable_during_download_prevents_writes_and_queued_jobs(self):
         started, release = threading.Event(), threading.Event()
         self.addCleanup(release.set)
-        def find(*args):
+        def find(*args, **kwargs):
             started.set(); release.wait(5); return DATA
         with patch.object(self.module, 'ThunderClient') as client:
             client.return_value.find.side_effect = find
@@ -196,6 +196,33 @@ class PluginTests(unittest.TestCase):
             client.return_value.find.return_value = None
             self.plugin.transfer_complete(self.event(files=[str(path)])); self.plugin._jobs.join()
         self.assertEqual(self.plugin.get_data('history')[0]['status'], '未匹配')
+
+    def test_original_release_name_survives_transfer_rename(self):
+        original = 'Movie.1994.BluRay.x265-EDGE2020.mkv'
+        with patch.object(self.module, 'ThunderClient') as client:
+            client.return_value.find.return_value = {**DATA, 'match': '片源类型一致'}
+            self.plugin.init_plugin({'enabled': True})
+            event = self.event()
+            event.event_data['fileitem'] = {'path': '/downloads/' + original}
+            event.event_data['transferinfo'].target_item = {'path': str(self.video)}
+            self.plugin.transfer_complete(event); self.plugin._jobs.join()
+            self.assertEqual(client.return_value.find.call_args.kwargs['source_name'], original)
+        message = self.plugin.get_data('history')[0]['message']
+        self.assertIn('来源：中文.srt', message)
+        self.assertIn('未校验时间轴', message)
+        self.assertIn(original, message)
+
+    def test_batch_hint_only_applies_to_its_own_destination(self):
+        other = self.root / 'other.mkv'; other.write_bytes(b'other')
+        with patch.object(self.module, 'ThunderClient') as client:
+            client.return_value.find.return_value = DATA
+            self.plugin.init_plugin({'enabled': True})
+            event = self.event(files=[str(self.video), str(other)])
+            event.event_data['fileitem'] = {'path': '/downloads/Movie.BluRay.mkv'}
+            event.event_data['transferinfo'].target_item = {'path': str(self.video)}
+            self.plugin.transfer_complete(event); self.plugin._jobs.join()
+            hints = {call.args[0].name: call.kwargs['source_name'] for call in client.return_value.find.call_args_list}
+            self.assertEqual(hints, {'movie.mkv': 'Movie.BluRay.mkv', 'other.mkv': ''})
 
 
 if __name__ == '__main__': unittest.main()
