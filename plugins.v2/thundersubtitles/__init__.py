@@ -39,7 +39,7 @@ class ThunderSubtitles(_PluginBase):
     plugin_name = '迅雷字幕'
     plugin_desc = '整理入库后按视频 CID 下载迅雷中文字幕。'
     plugin_icon = 'https://raw.githubusercontent.com/lj0014/MoviePilot-Plugins/main/icons/thundersubtitles.svg'
-    plugin_version = '1.0.0'
+    plugin_version = '1.0.1'
     plugin_author = 'lijin'
     author_url = 'https://github.com/lj0014'
     plugin_config_prefix = 'thundersubtitles_'
