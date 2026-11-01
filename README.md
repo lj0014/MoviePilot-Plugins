@@ -1,6 +1,6 @@
 # MoviePilot 插件
 
-MoviePilot V2 第三方插件源。
+MoviePilot V2 / V3 第三方插件源。
 
 ## 安装
 
@@ -12,7 +12,18 @@ https://github.com/lj0014/MoviePilot-Plugins/
 
 刷新插件市场，搜索并安装 **迅雷字幕**。
 
-插件通过 `package.v2.json` 和 `plugins.v2/` 目录分发源码，无需下载 Release 压缩包。`package.json` 为空，未提供 MoviePilot V1 或 V3 插件。
+同一个仓库地址供 V2、V3 使用，各版本自动选择对应实现，无需额外添加一条源。
+
+| 宿主 | 插件版本 | 索引与源码 |
+| --- | --- | --- |
+| MoviePilot V2 | 1.2.0 | `package.v2.json` / `plugins.v2/thundersubtitles/` |
+| MoviePilot V3.2.3 及以上 | 2.0.0 | `package.v3.json` / `plugins.v3/thundersubtitles/` |
+
+V2 的源码及索引保持不变，已声明不向 V3 回退提供旧实现。插件直接分发源码，无需下载 Release 压缩包。
+`package.json` 保持为空，不提供 MoviePilot V1 实现。一个宿主只加载自己对应的版本。
+
+V3 版使用稳定 SDK、类型化整理事件和宿主一次性任务；配置字段、插件 ID 及历史格式沿用 V2。
+新建 V3 配置默认中英双语优先，升级已有配置时保留原偏好。[V3 安装与测试说明](plugins.v3/thundersubtitles/README.md)。
 
 ## 迅雷字幕
 
@@ -80,6 +91,8 @@ ASS、SSA 等字幕沿用对应扩展名。插件一次为一个视频保存一�
 
 ## 开发
 
+字幕搜索、匹配和下载功能同时维护 V2、V3，并分别运行回归测试；宿主 SDK 和事件适配按各版本规范处理。
+
 ```sh
 python -m pip install -r requirements-dev.txt
 python tools/check_source.py
@@ -87,6 +100,18 @@ python -m unittest discover -s tests -v
 ```
 
 参考 [MoviePilot V2 开发指南](https://github.com/jxxghp/MoviePilot-Plugins/blob/main/docs/V2_Plugin_Development.md) 和 [ChineseSubFinder 插件](https://github.com/jxxghp/MoviePilot-Plugins/blob/main/plugins.v2/chinesesubfinder/__init__.py)。
+
+V3 按[插件开发指南](https://github.com/jxxghp/MoviePilot-Plugins/blob/main/docs/Plugin_Development.md)
+及[迁移规范](https://github.com/jxxghp/MoviePilot-Plugins/blob/main/docs/V3_Plugin_Adaptation.md)维护。
+在同级目录准备 MoviePilot V3 源码及其官方依赖环境后运行：
+
+```sh
+MOVIEPILOT_PATH=../MoviePilot ../MoviePilot/.venv/bin/python -m pytest tests/v3/thundersubtitles -q
+```
+
+V2 测试和 V3 测试在独立进程运行，V3 通过宿主 `app.testing` 隔离配置与数据库，
+使用生产命名空间 `app.plugins.thundersubtitles` 加载；测试不连接用户的真实配置和媒体库。
+V3 未新增第三方依赖，复用宿主提供的 requests、chardet 和 APScheduler，不安装或覆盖宿主依赖。
 
 已在 MoviePilot V2 验证整理入库事件、自动下载和已有字幕跳过。版本排序有自动测试覆盖，字幕是否同步仍需播放确认。
 
