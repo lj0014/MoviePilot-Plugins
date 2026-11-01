@@ -39,7 +39,7 @@ class ThunderSubtitles(_PluginBase):
     plugin_name = '迅雷字幕'
     plugin_desc = '整理入库后按视频 CID 下载迅雷中文字幕。'
     plugin_icon = 'https://raw.githubusercontent.com/lj0014/MoviePilot-Plugins/main/icons/thundersubtitles.svg'
-    plugin_version = '1.1.0'
+    plugin_version = '1.2.0'
     plugin_author = 'lijin'
     author_url = 'https://github.com/lj0014'
     plugin_config_prefix = 'thundersubtitles_'
@@ -233,8 +233,9 @@ class ThunderSubtitles(_PluginBase):
                     self._record(str(video), '跳过', '已有外置中文字幕', stop)
                     return
                 target = save_subtitle(video, subtitle, stop)
-            detail = '%s；来源：%s；版本线索：%s（未校验时间轴）' % (
-                target.name, subtitle.get('name', '未知'), subtitle.get('match', '无版本匹配线索'))
+            detail = '%s；来源：%s；查询：%s；版本线索：%s（未校验时间轴）' % (
+                target.name, subtitle.get('name', '未知'), subtitle.get('origin', 'CID'),
+                subtitle.get('match', '无版本匹配线索'))
             if source_name:
                 detail += '；原视频：' + source_name
             self._record(str(video), '成功', detail, stop)

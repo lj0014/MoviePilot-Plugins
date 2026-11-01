@@ -5,11 +5,13 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+import sys
 import unittest
 from unittest.mock import Mock, patch
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'plugins.v2/thundersubtitles'))
 spec = importlib.util.spec_from_file_location('thunder_core', ROOT / 'plugins.v2/thundersubtitles/thunder.py')
 t = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(t)
@@ -91,6 +93,24 @@ class SearchTests(unittest.TestCase):
 
 class DownloadTests(unittest.TestCase):
     @patch.object(t.requests, 'get')
+    def test_find_uses_name_api_and_preserves_source_in_result(self, get):
+        def request(url, **kwargs):
+            if '/subxl/' in url:
+                return response(b'{"sublist":[]}')
+            return response(json.dumps({'code': 0, 'data': [{'name': 'Spider-Man.2.2004.BluRay.chs.srt',
+                'url': 'https://subtitle.v.geilijiasu.com/spider.srt', 'languages': ['简体']}]}).encode())
+        get.side_effect = request
+        with tempfile.TemporaryDirectory() as directory:
+            movie = Path(directory) / '蜘蛛侠2 (2004) - 2160p.mkv'; movie.write_bytes(b'video')
+            client = t.ThunderClient()
+            with patch.object(client, 'fetch', return_value=CHINESE.encode()):
+                found = client.find(movie, source_name='Spider-Man.2.2004.BluRay.mkv')
+        self.assertEqual(found['origin'], '名称')
+        self.assertIn('片源类型一致', found['match'])
+        names = {call.kwargs['params']['name'] for call in get.call_args_list if 'params' in call.kwargs}
+        self.assertEqual(names, {'Spider-Man.2.2004.BluRay.mkv', '蜘蛛侠2 (2004) - 2160p.mkv'})
+
+    @patch.object(t.requests, 'get')
     def test_redirect_cannot_reach_private_host(self, get):
         get.return_value = response(b'', 302, {'Location': 'http://127.0.0.1/admin'})
         with self.assertRaises(t.SubtitleError): t.ThunderClient().fetch('https://subtitle.v.geilijiasu.com/a.srt')
@@ -161,6 +181,12 @@ class DownloadTests(unittest.TestCase):
 
 
 class ReleaseSelectionTests(unittest.TestCase):
+    def test_name_results_with_a_conflicting_year_are_rejected(self):
+        self.assertFalse(t.compatible('Movie.2004.BluRay.srt', 'Movie (2003).mkv'))
+        self.assertTrue(t.compatible('Movie.2004.BluRay.srt', 'Movie (2004).mkv'))
+        self.assertTrue(t.compatible('Movie.srt', 'Movie.x265-EDGE2020.mkv'))
+        self.assertIsNone(t.release_match('Movie.2004.EXT.BluRay.srt', 'Movie.2004.Theatrical.BluRay.mkv')[0])
+
     def candidates(self, names):
         return [{'name': name, 'language': '中文', 'rate': 5, 'votes': 100,
                  'url': 'https://subtitle.v.geilijiasu.com/%s.srt' % i}

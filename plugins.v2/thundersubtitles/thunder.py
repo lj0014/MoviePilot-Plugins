@@ -14,6 +14,12 @@ from urllib.parse import unquote, unquote_to_bytes, urljoin, urlsplit
 import chardet
 import requests
 
+try:
+    from .name_search import NameSearchError, SearchCancelled, combined_search
+except ImportError:
+    # The core can also be loaded independently by development tools.
+    from name_search import NameSearchError, SearchCancelled, combined_search
+
 API = 'http://sub.xmp.sandai.net:8000/subxl/{}.json'
 MAX_BYTES = 20 * 1024 * 1024
 TEXT_EXTENSIONS = {'.srt', '.ass', '.ssa', '.smi', '.vtt'}
@@ -126,6 +132,11 @@ def rank(candidate, preference):
 
 
 def compatible(name, video):
+    year_pattern = r'(?<![A-Za-z0-9])((?:19|20)\d{2})(?![A-Za-z0-9])'
+    subtitle_year = re.search(year_pattern, name)
+    video_year = re.search(year_pattern, Path(video).stem)
+    if subtitle_year and video_year and subtitle_year.group(1) != video_year.group(1):
+        return False
     for pattern in (r's(\d{1,2})[ ._-]*e(\d{1,3})', r'(?:cd|disc|disk)[ ._-]*(\d+)'):
         sub = re.search(pattern, name, re.I)
         movie = re.search(pattern, Path(video).stem, re.I)
@@ -148,7 +159,7 @@ def release_features(name):
             source.add(label)
     cuts = set()
     for label, pattern in (
-        ('extended', r'\bextended\b|加长|加長'),
+        ('extended', r'(?:^|[ ._-])ext(?:ended)?(?:[ ._-]|$)|加长|加長'),
         ('director', r"director[ ._'’-]*s?[ ._-]*cut|导演剪辑|導演剪輯"),
         ('theatrical', r'\btheatrical\b|院线版|院線版|公映版'),
         ('unrated', r'\bunrated\b|未分级|未分級'),
@@ -239,7 +250,19 @@ def validate_subtitle(data, extension):
 
 
 class ThunderClient:
-    def search(self, cid, preference='simplified', stop=None):
+    def search(self, cid, preference='simplified', stop=None, names=None):
+        if names is not None:
+            try:
+                records, failures = combined_search(
+                    (lambda: self.search(cid, preference, stop)) if cid else None,
+                    names, clean_name, stop.is_set if stop else None)
+                if not records and failures:
+                    raise SubtitleError('部分字幕接口查询失败，请稍后重试')
+                return sorted(records, key=lambda x: rank(x, preference), reverse=True)
+            except SearchCancelled:
+                raise Cancelled('任务已停止') from None
+            except NameSearchError:
+                raise SubtitleError('迅雷字幕查询失败') from None
         if not re.fullmatch(r'[0-9A-Fa-f]{40}', cid):
             raise SubtitleError('视频 CID 无效')
         for attempt in range(3):
@@ -305,9 +328,17 @@ class ThunderClient:
             yield data, extension, candidate['name']
 
     def find(self, video, preference='simplified', utf8=True, stop=None, source_name=''):
+        if Path(video).stat().st_size == 0:
+            raise SubtitleError('视频文件为空')
         reference = source_name or str(video)
         identity = str(video) + ' ' + reference
-        candidates = [item for item in self.search(cid_hash(video, stop), preference, stop)
+        try:
+            cid = cid_hash(video, stop)
+        except Cancelled:
+            raise
+        except (OSError, SubtitleError):
+            cid = ''
+        candidates = [item for item in self.search(cid, preference, stop, names=[reference, str(video)])
                       if compatible(item['name'], identity) and release_match(item['name'], reference)[0] is not None
                       and not re.fullmatch(r'(英语|英語|english|eng|en|日语|日語|jpn|ja)', item['language'].lower())]
         candidates.sort(key=lambda item: selection_rank(item, preference, reference), reverse=True)
@@ -330,6 +361,7 @@ class ThunderClient:
                     return {'data': text.encode('utf-8') if utf8 else content,
                             'extension': extension, 'name': name,
                             'source_name': clean_name(reference),
+                            'origin': candidate.get('origin', 'CID'),
                             'match': '；'.join(reasons) if reasons else '无版本匹配线索',
                             'match_score': score}
             except Cancelled:
