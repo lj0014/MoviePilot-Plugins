@@ -71,11 +71,11 @@ def test_host_market_selects_correct_generation(plugin, monkeypatch):
     client = PluginMarketClient()
     v3 = client.get_local_candidate('ThunderSubtitles')
     assert v3['package_version'] == 'v3'
-    assert v3['version'] == '2.0.0'
+    assert v3['version'] == '2.1.0'
     assert v3.get('compatible', True)
     assert v3['path'] == root / 'plugins.v3/thundersubtitles'
     monkeypatch.setattr(type(settings), 'VERSION_FLAG', property(lambda self: 'v2'))
     v2 = client.get_local_candidate('ThunderSubtitles', strict_system_version=False)
     assert v2['package_version'] == 'v2'
-    assert v2['version'] == '1.2.0'
+    assert v2['version'] == '1.3.0'
     assert v2['path'] == root / 'plugins.v2/thundersubtitles'

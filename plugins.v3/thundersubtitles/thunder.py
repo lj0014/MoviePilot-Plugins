@@ -203,9 +203,60 @@ def release_match(name, video_name):
     return score, reasons
 
 
-def selection_rank(candidate, preference, video_name):
+def timing_penalty(end, duration):
+    """Only penalize gross outliers; credits/silence make exact gaps ambiguous."""
+    duration, end = number(duration), number(end)
+    if not duration or not end:
+        return 0, ''
+    if end > duration + max(60, duration * 0.03):
+        return -120, '字幕结束时间明显超出视频'
+    if duration >= 600 and end < duration * 0.65:
+        return -100, '字幕时间轴明显偏短，可能为片段或分碟'
+    return 0, ''
+
+
+def subtitle_end(text, extension):
+    """Read cue end times, never infer the film runtime from the final cue."""
+    def timestamp(value):
+        match = re.fullmatch(r'(?:(\d{1,3}):)?(\d{1,2}):(\d{2})[,.](\d{1,3})', value.strip())
+        if not match:
+            return None
+        hours, minutes, seconds, fraction = match.groups()
+        if int(minutes) >= 60 or int(seconds) >= 60:
+            return None
+        return int(hours or 0) * 3600 + int(minutes) * 60 + int(seconds) + int(fraction.ljust(3, '0')) / 1000
+
+    ends = []
+    if extension in ('.srt', '.vtt'):
+        for line in text.splitlines():
+            match = re.match(r'\s*(\S+)\s+-->\s+(\S+)', line)
+            if match:
+                start, end = map(timestamp, match.groups())
+                if start is not None and end is not None and end >= start:
+                    ends.append(end)
+    elif extension in ('.ass', '.ssa'):
+        fields = ['layer', 'start', 'end', 'style', 'name', 'marginl', 'marginr', 'marginv', 'effect', 'text']
+        events = False
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith('['):
+                events = line.lower() == '[events]'
+            elif events and line.lower().startswith('format:'):
+                fields = [v.strip().lower() for v in line.split(':', 1)[1].split(',')]
+            elif events and line.lower().startswith('dialogue:') and 'start' in fields and 'end' in fields:
+                values = line.split(':', 1)[1].split(',', len(fields) - 1)
+                if len(values) == len(fields):
+                    start, end = timestamp(values[fields.index('start')]), timestamp(values[fields.index('end')])
+                    if start is not None and end is not None and end >= start:
+                        ends.append(end)
+    # SMI SYNC gives starts only. Do not present the last start as an end.
+    return max(ends) if ends else None
+
+
+def selection_rank(candidate, preference, video_name, duration=None):
     score, _ = release_match(candidate.get('name', ''), video_name)
-    return (score if score is not None else -1000,) + rank(candidate, preference)
+    penalty, _ = timing_penalty(number(candidate.get('duration_ms')) / 1000, duration)
+    return ((score + penalty) if score is not None else -1000,) + rank(candidate, preference)
 
 
 def decode_text(data):
@@ -323,7 +374,8 @@ class ThunderClient:
                 extension = '.srt'
             yield data, extension, candidate['name']
 
-    def find(self, video, preference='simplified', utf8=True, stop=None, source_name=''):
+    def find(self, video, preference='simplified', utf8=True, stop=None, source_name='', video_duration=None):
+        video_duration = number(video_duration) or None
         if Path(video).stat().st_size == 0:
             raise SubtitleError('视频文件为空')
         reference = source_name or str(video)
@@ -337,8 +389,10 @@ class ThunderClient:
         candidates = [item for item in self.search(cid, preference, stop, names=[reference, str(video)])
                       if compatible(item['name'], identity) and release_match(item['name'], reference)[0] is not None
                       and not re.fullmatch(r'(英语|英語|english|eng|en|日语|日語|jpn|ja)', item['language'].lower())]
-        candidates.sort(key=lambda item: selection_rank(item, preference, reference), reverse=True)
-        for candidate in candidates[:10]:
+        candidates.sort(key=lambda item: selection_rank(item, preference, reference, video_duration), reverse=True)
+        candidates = candidates[:10]
+        best, best_key, best_penalty = None, None, None
+        for index, candidate in enumerate(candidates):
             check_stop(stop)
             try:
                 data = self.fetch(candidate['url'], stop)
@@ -354,17 +408,38 @@ class ThunderClient:
                         text = validate_subtitle(content, extension)
                     except SubtitleError:
                         continue
-                    return {'data': text.encode('utf-8') if utf8 else content,
+                    end = subtitle_end(text, extension) if video_duration else None
+                    penalty, timing_reason = timing_penalty(end, video_duration)
+                    # API metadata only reorders downloads; reject an overrun
+                    # only after checking the downloaded text itself.
+                    if penalty == -120:
+                        continue
+                    actual = dict(candidate, name=name, duration_ms=(end or 0) * 1000)
+                    key = selection_rank(actual, preference, reference, video_duration)
+                    result = {'data': text.encode('utf-8') if utf8 else content,
                             'extension': extension, 'name': name,
                             'source_name': clean_name(reference),
                             'origin': candidate.get('origin', 'CID'),
                             'match': '；'.join(reasons) if reasons else '无版本匹配线索',
-                            'match_score': score}
+                            'match_score': score, 'timing': timing_reason or (
+                                '视频 %.1f 分钟；字幕结束 %.1f 分钟（仅排查明显时长异常）' % (video_duration / 60, end / 60)
+                                if video_duration and end else '未取得可比较的时间信息')}
+                    if not video_duration:
+                        return result
+                    if best_key is None or key > best_key:
+                        best, best_key, best_penalty = result, key, penalty
             except Cancelled:
                 raise
             except (requests.RequestException, SubtitleError, zipfile.BadZipFile, RuntimeError, NotImplementedError, UnicodeError):
                 continue
-        return None
+            # Stop once no remaining candidate can improve the verified result.
+            # Unknown/API-only timings get an optimistic bound, so a bogus API
+            # duration cannot hide a better release. Keep the 10-download cap.
+            if best is not None and best_penalty == 0:
+                upper = [selection_rank(item, preference, reference) for item in candidates[index + 1:]]
+                if not upper or max(upper) <= best_key:
+                    break
+        return best
 
 
 def has_subtitle(video):

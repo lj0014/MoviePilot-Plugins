@@ -44,6 +44,10 @@ jobs:
       - run: python -m pip install uv==0.13.6
       - run: uv sync --project MoviePilot --python "$(command -v python)" --frozen --no-dev
       - run: uv pip install --python MoviePilot/.venv/bin/python pytest==9.0.3
+      - name: Install media tools for real container tests
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
       - run: MoviePilot/.venv/bin/python plugin-source/tools/check_source.py
       - name: Official plugin version gate
         working-directory: plugin-source

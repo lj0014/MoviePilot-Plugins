@@ -42,9 +42,12 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 @pytest.fixture
-def plugin(configure_plugin_system_services):
+def plugin(configure_plugin_system_services, monkeypatch):
     """Create a real plugin instance with empty, isolated history."""
     from app.plugins.thundersubtitles import ThunderSubtitles
+    from app.plugins import thundersubtitles as adapter
+
+    monkeypatch.setattr(adapter, 'probe_media', lambda *args: {'streams': [], 'duration': None, 'error': ''})
 
     instance = ThunderSubtitles()
     instance.del_data('history')

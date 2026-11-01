@@ -36,13 +36,67 @@ def test_real_sdk_load_and_v2_configuration(plugin, scheduled):
            'cron': '0 */6 * * *', 'skip_existing': False, 'utf8': False,
            'source_prefix': '/old', 'local_prefix': '/new', 'custom': 'retained'}
     plugin.init_plugin(old)
-    assert plugin.plugin_version == '2.0.0'
+    assert plugin.plugin_version == '2.1.0'
     assert plugin._config == {**adapter.DEFAULTS, **old}
     assert plugin.get_state()
     assert plugin.get_api() == plugin.get_command() == []
     assert plugin.get_form()[1]['preference'] == 'bilingual'
     assert plugin.get_service()[0]['id'] == 'ThunderSubtitles.scan'
     assert plugin.get_page()[0]['component'] == 'VAlert'
+
+
+def test_embedded_chinese_skip_and_bilingual_policy(plugin, tmp_path, monkeypatch):
+    video = tmp_path / 'Movie.mkv'
+    video.write_bytes(b'video')
+    monkeypatch.setattr(adapter, 'probe_media', lambda *args: {
+        'streams': [{'tags': {'language': 'chi'}}], 'duration': 7200, 'error': ''})
+    find = Mock(return_value=DATA)
+    monkeypatch.setattr(adapter.ThunderClient, 'find', find)
+    plugin._process(video, dict(adapter.DEFAULTS), threading.Event())
+    find.assert_not_called()
+    assert '内置中文字幕' in plugin.get_data('history')[0]['message']
+    plugin._process(video, {**adapter.DEFAULTS, 'embedded_policy': 'bilingual'}, threading.Event())
+    assert find.call_args.kwargs['video_duration'] == 7200
+    assert video.with_suffix('.zh.srt').is_file()
+
+
+def test_probe_failure_continues_and_is_visible(plugin, tmp_path, monkeypatch):
+    video = tmp_path / 'Movie.mkv'
+    video.write_bytes(b'video')
+    monkeypatch.setattr(adapter, 'probe_media', lambda *args: {'streams': [], 'duration': None, 'error': '媒体信息读取超时'})
+    find = Mock(return_value=DATA)
+    monkeypatch.setattr(adapter.ThunderClient, 'find', find)
+    plugin._process(video, dict(adapter.DEFAULTS), threading.Event())
+    assert plugin.get_data('history')[0]['status'] == '成功'
+    assert '继续普通匹配' in plugin.get_data('history')[0]['message']
+
+
+def test_media_checks_disabled_avoid_probe(plugin, tmp_path, monkeypatch):
+    video = tmp_path / 'Movie.mkv'
+    video.write_bytes(b'video')
+    probe = Mock()
+    monkeypatch.setattr(adapter, 'probe_media', probe)
+    find = Mock(return_value=DATA)
+    monkeypatch.setattr(adapter.ThunderClient, 'find', find)
+    plugin._process(video, {**adapter.DEFAULTS, 'embedded_policy': 'off', 'timing_check': False}, threading.Event())
+    probe.assert_not_called()
+    assert find.call_args.kwargs['video_duration'] is None
+
+
+def test_stop_during_probe_prevents_search(plugin, tmp_path, monkeypatch):
+    video = tmp_path / 'Movie.mkv'
+    video.write_bytes(b'video')
+    stop = threading.Event()
+    def cancel(*args):
+        stop.set()
+        return {'streams': [], 'duration': 7200, 'error': ''}
+    monkeypatch.setattr(adapter, 'probe_media', cancel)
+    find = Mock()
+    monkeypatch.setattr(adapter.ThunderClient, 'find', find)
+    with pytest.raises(adapter.Cancelled):
+        plugin._process(video, dict(adapter.DEFAULTS), stop)
+    find.assert_not_called()
+    assert not video.with_suffix('.zh.srt').exists()
 
 
 @pytest.mark.parametrize('as_dict', [False, True])

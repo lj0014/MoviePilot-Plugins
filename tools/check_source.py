@@ -10,6 +10,12 @@ def check(root):
     for generation in ('v2', 'v3'):
         check_generation(root, generation)
     ET.parse(root / 'icons/thundersubtitles.svg')
+    v2, v3 = [root / ('plugins.' + v) / 'thundersubtitles' for v in ('v2', 'v3')]
+    for filename in ('media.py', 'name_search.py'):
+        assert (v2 / filename).read_bytes() == (v3 / filename).read_bytes(), filename + ' must stay in sync'
+    legacy = (v2 / 'thunder.py').read_text(encoding='utf-8')
+    legacy = legacy.replace('try:\n    from .name_search import NameSearchError, SearchCancelled, combined_search\nexcept ImportError:\n    # The core can also be loaded independently by development tools.\n    from name_search import NameSearchError, SearchCancelled, combined_search', 'from .name_search import NameSearchError, SearchCancelled, combined_search')
+    assert legacy == (v3 / 'thunder.py').read_text(encoding='utf-8'), 'V2/V3 subtitle core must stay in sync'
     print('V2/V3 source layout, metadata, version history and Python syntax verified.')
 
 
