@@ -16,6 +16,7 @@ from app.sdk.plugin import _PluginBase
 from app.sdk import scheduler as scheduler_sdk
 from app.schemas.types import EventType
 
+from .media import probe_media, embedded_subtitle
 from .thunder import Cancelled, SubtitleError, ThunderClient, VIDEO_EXTENSIONS, has_subtitle, save_subtitle
 
 
@@ -37,7 +38,8 @@ def mapped_path(value, source='', destination=''):
 
 DEFAULTS = {'enabled': False, 'onlyonce': False, 'paths': '', 'cron': '',
             'source_prefix': '', 'local_prefix': '', 'preference': 'bilingual',
-            'skip_existing': True, 'utf8': True}
+            'skip_existing': True, 'utf8': True, 'embedded_policy': 'chinese',
+            'timing_check': True, 'ffprobe_path': ''}
 
 
 @dataclass
@@ -57,7 +59,7 @@ class ThunderSubtitles(_PluginBase):
     plugin_name = '迅雷字幕'
     plugin_desc = '整理入库后合并 CID 和名称搜索，下载中文字幕。'
     plugin_icon = 'https://raw.githubusercontent.com/lj0014/MoviePilot-Plugins/main/icons/thundersubtitles.svg'
-    plugin_version = '2.0.0'
+    plugin_version = '2.1.0'
     plugin_author = 'lijin'
     author_url = 'https://github.com/lj0014'
     plugin_config_prefix = 'thundersubtitles_'
@@ -281,10 +283,22 @@ class ThunderSubtitles(_PluginBase):
             if config.get('skip_existing') and has_subtitle(video):
                 self._record(str(video), '跳过', '已有外置中文字幕', stop)
                 return
+            media = {'streams': [], 'duration': None, 'error': ''}
+            policy = config.get('embedded_policy', 'chinese')
+            if policy in ('chinese', 'bilingual') or config.get('timing_check', True):
+                media = probe_media(video, config.get('ffprobe_path') or '', stop)
+            if stop.is_set():
+                raise Cancelled('任务已停止')
+            reason = embedded_subtitle(media['streams'], policy)
+            if reason:
+                self._record(str(video), '跳过', reason, stop)
+                return
+            probe_note = ('；' + media['error'] + '，已继续普通匹配') if media['error'] else ''
             subtitle = ThunderClient().find(video, config.get('preference', 'simplified'), bool(config.get('utf8')), stop,
-                                            source_name=source_name)
+                                            source_name=source_name,
+                                            video_duration=media['duration'] if config.get('timing_check', True) else None)
             if subtitle is None:
-                self._record(str(video), '未匹配', '未找到可用的中文字幕', stop)
+                self._record(str(video), '未匹配', '未找到可用的中文字幕' + probe_note, stop)
                 return
             with self._write_lock:
                 if stop.is_set():
@@ -293,9 +307,12 @@ class ThunderSubtitles(_PluginBase):
                     self._record(str(video), '跳过', '已有外置中文字幕', stop)
                     return
                 target = save_subtitle(video, subtitle, stop)
-            detail = '%s；来源：%s；查询：%s；版本线索：%s（未校验时间轴）' % (
+            detail = '%s；来源：%s；查询：%s；版本线索：%s（未作音频对齐）' % (
                 target.name, subtitle.get('name', '未知'), subtitle.get('origin', 'CID'),
                 subtitle.get('match', '无版本匹配线索'))
+            if config.get('timing_check', True):
+                detail += '；时长检查：' + subtitle.get('timing', '未取得可比较的时间信息')
+            detail += probe_note
             if source_name:
                 detail += '；原视频：' + source_name
             self._record(str(video), '成功', detail, stop)
@@ -339,6 +356,12 @@ class ThunderSubtitles(_PluginBase):
         rows = [
             [control('VSwitch', 'enabled', '启用插件'), control('VSwitch', 'onlyonce', '保存后扫描一次')],
             [control('VSwitch', 'skip_existing', '已有外置中文字幕时跳过'), control('VSwitch', 'utf8', '字幕保存为 UTF-8')],
+            [control('VSelect', 'embedded_policy', '内置字幕跳过规则', items=[
+                {'title': '已有明确标注的中文字幕时跳过', 'value': 'chinese'},
+                {'title': '已有明确标注的中英字幕时跳过', 'value': 'bilingual'},
+                {'title': '不检查内置字幕', 'value': 'off'}]),
+             control('VSwitch', 'timing_check', '按时长辅助筛选字幕')],
+            [control('VTextField', 'ffprobe_path', 'ffprobe 路径（可选，留空自动查找）')],
             [control('VSelect', 'preference', '字幕偏好', items=[{'title': '简体优先', 'value': 'simplified'},
                  {'title': '繁体优先', 'value': 'traditional'}, {'title': '中英双语优先', 'value': 'bilingual'}]),
              control('VTextField', 'cron', '扫描周期（五段 cron，留空不定时扫描）', placeholder='0 */6 * * *')],
@@ -348,4 +371,4 @@ class ThunderSubtitles(_PluginBase):
         return [{'component': 'VForm', 'content': [
             {'component': 'VRow', 'content': row} for row in rows] + [
             {'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal',
-             'text': '自动处理整理入库文件，无需额外字幕服务器。只读取本地或已挂载文件；字幕保存为影片名.zh.srt/ass 等，不覆盖原文件。无语言标签的同名字幕也按已有字幕处理。仅检测外置字幕，不检测内嵌字幕。'}}]}], dict(DEFAULTS)
+             'text': '自动处理整理入库文件，无需额外字幕服务器。只读取本地或已挂载文件；字幕保存为影片名.zh.srt/ass 等，不覆盖原文件。无语言标签的同名字幕也按已有字幕处理。内置检测依据语言和轨道名称，强制及特效轨道不作完整字幕。媒体信息读取失败仍继续下载；时长仅排查明显异常，不保证同步。'}}]}], dict(DEFAULTS)

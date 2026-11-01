@@ -54,6 +54,8 @@ class PluginTests(unittest.TestCase):
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         self.module = module
+        probe = patch.object(module, 'probe_media', return_value={'streams': [], 'duration': None, 'error': ''})
+        self.probe = probe.start(); self.addCleanup(probe.stop)
         self.plugin = module.ThunderSubtitles()
         self.addCleanup(self.plugin.stop_service)
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
@@ -73,6 +75,41 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(self.plugin.get_api(), [])
         self.assertEqual(self.plugin.get_command(), [])
         self.assertEqual(self.plugin.get_page()[0]['component'], 'VAlert')
+
+    def test_embedded_chinese_skips_search_and_bilingual_rule_continues(self):
+        self.probe.return_value = {'streams': [{'tags': {'language': 'chi'}}], 'duration': 7200, 'error': ''}
+        with patch.object(self.module, 'ThunderClient') as client:
+            self.plugin._process(self.video, dict(self.module.DEFAULTS), threading.Event())
+            client.assert_not_called()
+            self.assertIn('内置中文字幕', self.plugin.get_data('history')[0]['message'])
+            client.return_value.find.return_value = DATA
+            self.plugin._process(self.video, {**self.module.DEFAULTS, 'embedded_policy': 'bilingual'}, threading.Event())
+            self.assertEqual(client.return_value.find.call_args.kwargs['video_duration'], 7200)
+
+    def test_probe_failure_continues_and_is_visible_in_history(self):
+        self.probe.return_value = {'streams': [], 'duration': None, 'error': '媒体信息读取超时'}
+        with patch.object(self.module, 'ThunderClient') as client:
+            client.return_value.find.return_value = DATA
+            self.plugin._process(self.video, dict(self.module.DEFAULTS), threading.Event())
+        self.assertIn('继续普通匹配', self.plugin.get_data('history')[0]['message'])
+        self.assertEqual(self.plugin.get_data('history')[0]['status'], '成功')
+
+    def test_both_media_checks_off_avoid_probe_and_stop_prevents_download(self):
+        with patch.object(self.module, 'ThunderClient') as client:
+            client.return_value.find.return_value = DATA
+            self.plugin._process(self.video, {**self.module.DEFAULTS, 'embedded_policy': 'off', 'timing_check': False}, threading.Event())
+            self.probe.assert_not_called()
+            self.assertIsNone(client.return_value.find.call_args.kwargs['video_duration'])
+        self.video.with_suffix('.zh.srt').unlink()
+        stop = threading.Event()
+        def cancel(*args):
+            stop.set()
+            return {'streams': [], 'duration': 7200, 'error': ''}
+        self.probe.side_effect = cancel
+        with patch.object(self.module, 'ThunderClient') as client:
+            with self.assertRaises(self.module.Cancelled):
+                self.plugin._process(self.video, dict(self.module.DEFAULTS), stop)
+            client.assert_not_called()
 
     def test_transfer_downloads_sidecar_and_history(self):
         with patch.object(self.module, 'ThunderClient') as client:
@@ -209,7 +246,7 @@ class PluginTests(unittest.TestCase):
             self.assertEqual(client.return_value.find.call_args.kwargs['source_name'], original)
         message = self.plugin.get_data('history')[0]['message']
         self.assertIn('来源：中文.srt', message)
-        self.assertIn('未校验时间轴', message)
+        self.assertIn('未作音频对齐', message)
         self.assertIn(original, message)
 
     def test_batch_hint_only_applies_to_its_own_destination(self):
