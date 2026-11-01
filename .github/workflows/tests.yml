@@ -16,3 +16,37 @@ jobs:
       - run: python -m pip install -r requirements-dev.txt
       - run: python tools/check_source.py
       - run: python -m unittest discover -s tests -v
+  v3-host:
+    name: V3 host contracts (Python 3.14)
+    runs-on: ubuntu-24.04
+    env:
+      MOVIEPILOT_PATH: ${{ github.workspace }}/MoviePilot
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: plugin-source
+      - uses: actions/checkout@v4
+        with:
+          repository: jxxghp/MoviePilot
+          ref: c4e1caeb3a66707c55fbaab48345a129154029f3
+          path: MoviePilot
+      - uses: actions/checkout@v4
+        with:
+          repository: jxxghp/MoviePilot-Plugins
+          ref: d06ad8c6abd91374c273ba47c4a19f35e8a33ddd
+          sparse-checkout: .github/scripts/check_plugin_versions.py
+          sparse-checkout-cone-mode: false
+          path: official-plugin-tools
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m pip install uv==0.13.6
+      - run: uv sync --project MoviePilot --python "$(command -v python)" --frozen --no-dev
+      - run: uv pip install --python MoviePilot/.venv/bin/python pytest==9.0.3
+      - run: MoviePilot/.venv/bin/python plugin-source/tools/check_source.py
+      - name: Official plugin version gate
+        working-directory: plugin-source
+        run: ../MoviePilot/.venv/bin/python ../official-plugin-tools/.github/scripts/check_plugin_versions.py package.json package.v2.json package.v3.json
+      - name: Real V3 SDK, events, scheduler and market selection
+        run: MoviePilot/.venv/bin/python -m pytest plugin-source/tests/v3/thundersubtitles -q

@@ -1,4 +1,4 @@
-"""Validate the V2 market index and its installable source directory."""
+"""Validate the separate V2/V3 indexes and installable source directories."""
 import ast
 import json
 from pathlib import Path
@@ -7,9 +7,17 @@ import xml.etree.ElementTree as ET
 
 def check(root):
     assert json.loads((root / 'package.json').read_text(encoding='utf-8')) == {}
-    index = json.loads((root / 'package.v2.json').read_text(encoding='utf-8'))
+    for generation in ('v2', 'v3'):
+        check_generation(root, generation)
+    ET.parse(root / 'icons/thundersubtitles.svg')
+    print('V2/V3 source layout, metadata, version history and Python syntax verified.')
+
+
+def check_generation(root, generation):
+    """Check one index without allowing it to resolve another generation's code."""
+    index = json.loads((root / ('package.' + generation + '.json')).read_text(encoding='utf-8'))
     for plugin_id, metadata in index.items():
-        directory = root / 'plugins.v2' / plugin_id.lower()
+        directory = root / ('plugins.' + generation) / plugin_id.lower()
         module = ast.parse((directory / '__init__.py').read_text(encoding='utf-8'))
         cls = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == plugin_id)
         values = {node.targets[0].id: ast.literal_eval(node.value) for node in cls.body
@@ -18,12 +26,25 @@ def check(root):
         assert values['plugin_name'] == metadata['name']
         assert values['plugin_desc'] == metadata['description']
         assert metadata['release'] is False
-        assert metadata['v3'] is False
-        assert 'v' + metadata['version'] in metadata['history']
+        history = list(metadata['history'])
+        assert history[0] == 'v' + metadata['version']
+        assert history == sorted(history, key=lambda v: tuple(int(x) for x in v.lstrip('v').split('.')), reverse=True)
+        if generation == 'v2':
+            assert metadata['v3'] is False
+        else:
+            assert metadata['system_version'] == '>=3.2.3'
+            old = json.loads((root / 'package.v2.json').read_text(encoding='utf-8'))[plugin_id]
+            assert int(metadata['version'].split('.')[0]) > int(old['version'].split('.')[0])
+            assert not list(directory.rglob('test_*.py'))
         for source in directory.rglob('*.py'):
-            compile(source.read_text(encoding='utf-8'), str(source), 'exec')
-    ET.parse(root / 'icons/thundersubtitles.svg')
-    print('V2 source layout, metadata and Python syntax verified.')
+            text = source.read_text(encoding='utf-8')
+            compile(text, str(source), 'exec')
+            if generation == 'v3':
+                tree = ast.parse(text)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.ImportFrom):
+                        module = node.module or ''
+                        assert not module.startswith(('app.core', 'app.helper', 'app.utils', 'app.db.models', 'app.sdk._legacy'))
 
 
 if __name__ == '__main__': check(Path(__file__).resolve().parents[1])
